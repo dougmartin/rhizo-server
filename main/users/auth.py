@@ -1,5 +1,6 @@
 # standard python imports
 import os
+import time  # fix(clean): remove
 import random
 import base64
 import hashlib
@@ -15,7 +16,6 @@ from sqlalchemy.orm.exc import NoResultFound
 # internal imports
 from main.app import db
 from main.app import login_manager
-from main.users.encrypt import AESCipher
 from main.users.models import User, Key
 from main.util import load_server_config  # fix(clean): remove?
 
@@ -111,10 +111,15 @@ def create_key(creation_user_id, organization_id, access_as_user_id, access_as_c
         key_text = current_app.config['KEY_PREFIX'] + generate_access_code(50)
 
     # encrypt the key
-    # fix(soon): remove this and just used keys hashed like passwords
-    nonce = base64.b64encode(os.urandom(32))
-    aes = AESCipher(current_app.config['KEY_STORAGE_KEY'])
-    key_enc = aes.encrypt(nonce + ';' + key_text)
+    # fix(soon): remove this once no longer in use
+    if current_app.config.get('KEY_STORAGE_KEY'):  # not needed on new systems
+        from main.users.encrypt import AESCipher
+        nonce = base64.b64encode(os.urandom(32))
+        aes = AESCipher(current_app.config['KEY_STORAGE_KEY'])
+        key_enc = aes.encrypt(nonce + ';' + key_text)
+    else:
+        nonce = ''
+        key_enc = ''
 
     # create a key record
     key = Key()
@@ -135,15 +140,27 @@ def create_key(creation_user_id, organization_id, access_as_user_id, access_as_c
 # find a key record from the database given the raw key string
 def find_key(key_text):
     key_part = key_text[:3] + key_text[-3:]
+    iph = inner_password_hash(key_text)
     for key in Key.query.filter(Key.key_part == key_part, Key.revocation_timestamp == None):
-        if bcrypt.checkpw(inner_password_hash(key_text), key.key_hash.encode()):
+        if bcrypt.checkpw(iph, key.key_hash.encode()):
             return key
+    return None
+
+
+# find a key record from the database given the raw key string;
+# a temporary/fast version that doesn't actually check for a full key match
+def find_key_fast(key_text):
+    key_part = key_text[:3] + key_text[-3:]
+    iph = inner_password_hash(key_text)
+    for key in Key.query.filter(Key.key_part == key_part, Key.revocation_timestamp == None):
+        return key
     return None
 
 
 # find a key given an auth code (a hashed version of the key)
 # fix(soon): remove this
 def find_key_by_code(auth_code):
+    from main.users.encrypt import AESCipher
     parts = auth_code.split(';')
     if len(parts) != 3:
         return None

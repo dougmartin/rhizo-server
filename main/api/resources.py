@@ -1,4 +1,5 @@
 import json
+import time  # fix(clean): remove?
 import base64
 import hashlib  # fix(clean): remove?
 import zipfile
@@ -21,7 +22,7 @@ from main.util import parse_json_datetime
 from main.resources.models import Resource, ResourceRevision, ResourceView, ControllerStatus, Thumbnail
 from main.resources.resource_util import find_resource, read_resource, add_resource_revision, _create_file, update_sequence_value, resource_type_number, _create_folders, create_sequence
 from main.resources.file_conversion import convert_csv_to_xls, convert_xls_to_csv, convert_new_lines, compute_thumbnail
-from main.users.auth import find_key, find_key_by_code  # fix(clean): remove?
+from main.users.auth import find_key, find_key_fast, find_key_by_code  # fix(clean): remove?
 
 
 class ResourceRecord(ApiResource):
@@ -290,6 +291,15 @@ class ResourceRecord(ApiResource):
             if 'full_name' in args and args['full_name']:
                 system_attributes['full_name'] = args['full_name']
             r.system_attributes = json.dumps(system_attributes)
+        elif r.type == Resource.CONTROLLER_FOLDER:
+            if 'status' in args:
+                try:
+                    controller_status = ControllerStatus.query.filter(ControllerStatus.id == r.id).one()
+                    status = json.loads(controller_status.attributes)
+                    status.update(json.loads(args['status']))  # add/update status (don't provide way to remove status fields; maybe should overwrite instead)
+                    controller_status.attributes = json.dumps(status)
+                except NoResultFound:
+                    pass
         else:  # fix(soon): remove this case
             if 'system_attributes' in args:
                 r.system_attributes = args['system_attributes']  # note that this will overwrite any existing system attributes; client must preserve any that aren't modified
@@ -314,7 +324,7 @@ class ResourceRecord(ApiResource):
 class ResourceList(ApiResource):
 
     # get a list of resources of a particular type
-    # (use the individual resource GET method to get a list of resources contained with a foldeR)
+    # (use the individual resource GET method to get a list of resources contained with a folder)
     # fix(later): decide what this should do; current just using for system controller list
     def get(self):
         args = request.values
@@ -516,6 +526,65 @@ class ResourceList(ApiResource):
 
         return {'status': 'ok', 'id': r.id}
 
+    # update multiple resources at once
+    # (currently only intended for updating multiple sequences at once)
+    # values should be a dictionary mapping resource paths (starting with slash) to values
+    # if timestamp is specified, it will be applied used for the updates
+    def put(self):
+        start_time = time.time()
+        values = json.loads(request.values['values'])
+        if 'timestamp' in request.values:
+            timestamp = parse_json_datetime(request.values['timestamp'])
+
+            # check for drift
+            delta = datetime.datetime.utcnow() - timestamp
+            drift = delta.total_seconds()
+            #print 'drift', drift
+            if abs(drift) > 30:
+
+                # get current controller correction
+                # fix(later): support user updates as well?
+                auth = request.authorization
+                start_key_time = time.time()
+                key = find_key_fast(auth.password)  # key is provided as HTTP basic auth password
+                end_key_time = time.time()
+                #print '---- key: %.2f' % (end_key_time - start_key_time)
+                if key and key.access_as_controller_id:
+                    controller_id = key.access_as_controller_id
+                    controller_status = ControllerStatus.query.filter(ControllerStatus.id == controller_id).one()
+                    attributes = json.loads(controller_status.attributes)
+                    correction = attributes.get('timestamp_correction', 0)
+
+                    # if stored correction is reasonable, use it; otherwise store new correction
+                    if abs(correction - drift) > 100:
+                        correction = drift
+                        attributes['timestamp_correction'] = drift
+                        controller_status.attributes = json.dumps(attributes)
+                        db.session.commit()
+                        #print 'storing new correction (%.2f)' % correction
+                    else:
+                        pass
+                        #print 'applying previous correction (%.2f)' % correction
+                    timestamp += datetime.timedelta(seconds=correction)
+        else:
+            timestamp = datetime.datetime.utcnow()
+
+        # for now, assume all sequences in same folder
+        first_name = values.iterkeys().next()
+        folder_name = first_name.rsplit('/', 1)[0]
+        folder_resource = find_resource(folder_name)
+        if folder_resource: # and access_level(folder_resource.query_permissions()) >= ACCESS_LEVEL_WRITE:
+            for (full_name, value) in values.iteritems():
+                seq_name = full_name.rsplit('/', 1)[1]
+                try:
+                    resource = Resource.query.filter(Resource.parent_id == folder_resource.id, Resource.name == seq_name, Resource.deleted == False).one()
+                    update_sequence_value(resource, full_name, timestamp, str(value), emit_message=False)  # fix(later): revisit emit_message
+                except NoResultFound:
+                    pass
+        db.session.commit()
+        end_time = time.time()
+        #print '==== %.2f' % (end_time - start_time)
+
 
 # get a list of all resources contained with a folder (specified by parent_id)
 def resource_list(parent_id, recursive, type, filter, extended):
@@ -528,6 +597,12 @@ def resource_list(parent_id, recursive, type, filter, extended):
     file_infos = []
     for child in children:
         file_info = child.as_dict(extended = extended)
+        if extended and child.type == Resource.CONTROLLER_FOLDER:
+            try:
+                controller_status = ControllerStatus.query.filter(ControllerStatus.id == child.id).one()
+                file_info.update(controller_status.as_dict(extended=True))
+            except NoResultFound:
+                pass
         if recursive:
             file_info['path'] = child.path()
             file_info['fullPath'] = child.path()  # fix(soon): remove this

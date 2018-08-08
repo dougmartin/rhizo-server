@@ -18,6 +18,9 @@ For development purposes you can run the server with automatic code reloading: `
 
 You can also run it with websocket support (but no auto-reloading): `python run.py -s`
 
+Note: this websocket server (`-s` option) don't seem to work with gevent 1.2 (at least on Windows); 
+you may need to downgrade to gevent 1.1.2.
+
 ## System Design
 
 ### Users
@@ -134,3 +137,47 @@ Coding style guidelines:
 *   JavaScript code should use camel case.
 *   JavaScript code should have two blank lines between top-level code blocks (to match Python code).
 *   JavaScript and HTML files should use dashes as word separators in their file names.
+
+## Running in Production
+
+These are preliminary notes on running the server in a production environment with nginx and uwsgi.
+When running the server in this way, you will no longer execute 'run.py' from the command line.
+Instead the server will be run as a set of systemd services.
+
+We have previously deployed the server on EC2 instances running Ubuntu.
+We assume that you have followed the setup instructions above and have placed
+the rhizo-server repository at `/home/ubuntu/rhizo-server` (if you want to use a 
+different path, update the settings and service files accordingly).
+
+Copy `nginx.conf`, `uwsgi.ini`, and `ws-config.py` from `sample_settings` to `settings`. 
+Set your domain name within the file `nginx.conf`.
+
+Install dependencies:
+
+    sudo apt install nginx
+    sudo apt install libpq-dev
+    sudo pip install uwsgi
+    sudo apt install letsencrypt
+
+Configure nginx:
+
+    cd /etc/nginx/sites-enabled
+    sudo rm default
+    sudo ln -s /home/ubuntu/rhizo-server/settings/nginx.conf rhizo-server
+
+Get SSL certificates:
+
+    sudo systemctl stop nginx
+    sudo letsencrypt certonly --standalone -d [domain name here]
+    sudo systemctl start nginx
+
+Configure systemd services:
+
+    sudo cp /home/ubuntu/rhizo-zerver/sample_settings/*.service /etc/systemd/system
+    sudo systemctl enable nginx
+    sudo systemctl enable rs
+    sudo systemctl enable rs-ws
+    sudo systemctl enable rs-worker
+    sudo systemctl start rs
+    sudo systemctl start rs-ws
+    sudo systemctl start rs-worker

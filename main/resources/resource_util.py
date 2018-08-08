@@ -13,7 +13,6 @@ from sqlalchemy.orm.exc import NoResultFound, MultipleResultsFound
 # internal imports
 from main.app import db, message_queue, storage_manager
 from main.resources.models import Resource, ResourceRevision, Thumbnail
-from main.resources.bulk_storage import read_storage, write_storage, storage_path
 from main.resources.file_conversion import compute_thumbnail
 from main.users.permissions import ACCESS_LEVEL_WRITE, ACCESS_TYPE_ORG_USERS, ACCESS_TYPE_ORG_CONTROLLERS
 
@@ -171,7 +170,7 @@ def mime_type_from_ext(file_name):
 # it (1) creates a sequence value record and (2) sends out a sequence_update message;
 # note that we don't commit resource here; outside code must commit
 # value should be a plain string (not unicode string), possibly containing binary data or encoded unicode data
-def update_sequence_value(resource, resource_path, timestamp, value):
+def update_sequence_value(resource, resource_path, timestamp, value, emit_message=True):
     data_type = json.loads(resource.system_attributes)['data_type']
 
     # determine min interval between updates
@@ -184,13 +183,14 @@ def update_sequence_value(resource, resource_path, timestamp, value):
             min_storage_interval = 50
 
     # prep sequence update message data
-    message_params = {
-        'id': resource.id,
-        'name': resource_path,
-        'timestamp': timestamp.isoformat() + 'Z',
-    }
-    if data_type != Resource.IMAGE_SEQUENCE:  # for images we'll send revision IDs
-        message_params['value'] = value  # fix(soon): json.dumps crashes if this included binary data
+    if emit_message:
+        message_params = {
+            'id': resource.id,
+            'name': resource_path,
+            'timestamp': timestamp.isoformat() + 'Z',
+        }
+        if data_type != Resource.IMAGE_SEQUENCE:  # for images we'll send revision IDs
+            message_params['value'] = value  # fix(soon): json.dumps crashes if this included binary data
 
     # if too soon since last update, don't store a new value (but do still send out an update message)
     if min_storage_interval == 0 or timestamp >= resource.modification_timestamp + datetime.timedelta(seconds=min_storage_interval):
@@ -207,11 +207,13 @@ def update_sequence_value(resource, resource_path, timestamp, value):
             except NoResultFound:
                 thumbnail_resource = create_sequence(resource, name, Resource.IMAGE_SEQUENCE)
             thumbnail_revision = add_resource_revision(thumbnail_resource, timestamp, thumbnail_contents)
-            message_params['revision_id'] = resource_revision.id
-            message_params['thumbnail_revision_id'] = thumbnail_revision.id
+            if emit_message:
+                message_params['revision_id'] = resource_revision.id
+                message_params['thumbnail_revision_id'] = thumbnail_revision.id
 
     # create a short lived update message for subscribers to the folder containing this sequence
-    message_queue.add(folder_id = resource.parent_id, type = 'sequence_update', parameters = message_params, timestamp = timestamp)
+    if emit_message:
+        message_queue.add(folder_id = resource.parent_id, type = 'sequence_update', parameters = message_params, timestamp = timestamp)
 
 
 # creates a resource revision record; places the data in the record (if it is small) or bulk storage (if it is large);
@@ -221,7 +223,7 @@ def add_resource_revision(resource, timestamp, data):
     resource_revision = ResourceRevision()
     resource_revision.resource_id = resource.id
     resource_revision.timestamp = timestamp
-    if len(data) < 1000 or not storage_manager['enabled']:
+    if len(data) < 1000 or not storage_manager:
         resource_revision.data = data
         bulk_storage = False
     else:
@@ -229,7 +231,7 @@ def add_resource_revision(resource, timestamp, data):
     db.session.add(resource_revision)
     db.session.commit()
     if bulk_storage:
-        write_storage(storage_path(resource, resource_revision.id), data)
+        storage_manager.write(resource.storage_path(resource_revision.id), data)
     resource.last_revision_id = resource_revision.id  # note that we don't commit here; outside code must commit
     return resource_revision
 
@@ -250,10 +252,10 @@ def read_resource(resource, revision_id = None, check_timing = False):
             data = resource_revision.data
         except NoResultFound:
             pass
-        if data is None and storage_manager['enabled']:  # fix(later): move this inside try statement; we should always have a resource revision if we have data in storage
+        if data is None and storage_manager:  # fix(later): move this inside try statement; we should always have a resource revision if we have data in storage
             if check_timing:
                 start_time = time.time()
-            data = read_storage(storage_path(resource, revision_id))
+            data = storage_manager.read(resource.storage_path(revision_id))
             if check_timing:
                 print('storage time: %.4f' % (time.time() - start_time))
     return data

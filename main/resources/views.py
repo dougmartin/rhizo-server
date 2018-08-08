@@ -79,6 +79,9 @@ def view_item(item_path):
                 folder = Resource.query.filter(Resource.parent == parent_folder, Resource.name == path_part, Resource.deleted == False).one()
             except NoResultFound:
                 pass
+            except MultipleResultsFound:
+                print('multiple results for %s at level %s' % (item_path, path_part))
+                abort(404)
         else:
             try:
                 folder = Resource.query.filter(Resource.parent == None, Resource.name == path_part, Resource.deleted == False).one()
@@ -271,9 +274,9 @@ def sequence_viewer(resource):
 
 # a viewer for a data file
 def file_viewer(resource, check_timing = False, is_home_page = False):
-    contents = read_resource(resource, check_timing)
+    contents = read_resource(resource, check_timing=check_timing)
     if contents is None:
-        print('file_viewer: storage not found')
+        print('file_viewer: storage not found (resource: %d, path: %s)' % (resource.id, resource.path()))
         abort(404)
     system_attributes = json.loads(resource.system_attributes) if resource.system_attributes else {}
     if system_attributes.get('file_type') == 'md' or resource.name.endswith('.md'):  # fix(soon): revisit this

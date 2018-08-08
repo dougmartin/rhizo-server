@@ -64,6 +64,8 @@ class Resource(db.Model):
             d['user_attributes'] = json.loads(self.user_attributes) if self.user_attributes else {}
             d['lastRevisionId'] = self.last_revision_id  # fix(soon): remove
             d['last_revision_id'] = self.last_revision_id
+            if self.last_revision_id:
+                d['storage_path'] = self.storage_path(self.last_revision_id)
             if self.type == self.FILE:  # fix(later): remove this case after migrate DB and update client sync code (and browser display code) to use direct system_attributes
                 d['hash'] = d['system_attributes'].get('hash') or self.hash
                 d['size'] = d['system_attributes'].get('size') or self.size
@@ -124,6 +126,14 @@ class Resource(db.Model):
                 permissions = parent_permissions
         return permissions
 
+    # get the path of the resource in the bulk storage system
+    def storage_path(self, revision_id):
+        org_id = self.organization_id
+        if not org_id:  # fix(clean): remove this
+            org_id = self.root().id
+        id_str = '%09d' % self.id
+        return '%d/%s/%s/%s/%d_%d' % (org_id, id_str[-9:-6], id_str[-6:-3], id_str[-3:], self.id, revision_id)
+
 
 # The ResourceRevision model holds a revision history or time series history of a resource.
 class ResourceRevision(db.Model):
@@ -178,19 +188,22 @@ class ControllerStatus(db.Model):
     __tablename__               = 'controller_status'
     id                          = db.Column(db.ForeignKey('resources.id'), primary_key = True)
     client_version              = db.Column(db.String(80), nullable = False)
-    web_socket_connected        = db.Column(db.Boolean, nullable = False)
+    web_socket_connected        = db.Column(db.Boolean, nullable = False)  # not used currently (may be too brittle); remove?
     last_connect_timestamp      = db.Column(db.DateTime)                   # last time the controler connected
     last_watchdog_timestamp     = db.Column(db.DateTime)                   # last time the controller sent good watchdog message
     watchdog_notification_sent  = db.Column(db.Boolean, nullable = False)
-    attributes                  = db.Column(db.String, nullable = False)   # JSON field containing extra attributes
+    attributes                  = db.Column(db.String, nullable = False)   # JSON field containing extra controller status information
 
-    def as_dict(self):
-        return {
+    def as_dict(self, extended=False):
+        d = {
             'client_version': self.client_version,
             'web_socket_connected': self.web_socket_connected,
             'last_connect_timestamp': self.last_connect_timestamp.isoformat() + ' Z' if self.last_connect_timestamp else '',
             'last_watchdog_timestamp': self.last_watchdog_timestamp.isoformat() + ' Z' if self.last_watchdog_timestamp else '',
         }
+        if extended:
+            d['status'] = json.loads(self.attributes)
+        return d
 
 
 # the Thumbnail model stores versions of image resources at multiple scales
